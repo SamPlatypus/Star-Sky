@@ -29,6 +29,9 @@ async function boot() {
   document.getElementById('about-version').textContent = `Version ${VERSION}`;
 }
 
+// iOS Safari ignores user-scalable=no; stop page pinch-zoom so the gesture reaches the sky.
+document.addEventListener('gesturestart', (e) => e.preventDefault());
+
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('./sw.js').catch((err) => console.warn('service worker registration failed', err));

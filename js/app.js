@@ -493,9 +493,11 @@ export class App {
   resize() {
     const rect = this.el.stage.getBoundingClientRect();
     const w = Math.max(1, rect.width), h = Math.max(1, rect.height);
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    this.renderer.resize(w, h, dpr);
-    this.labels.resize(w, h, dpr);
+    const dpr = window.devicePixelRatio || 1;
+    // The sky is soft by nature: 1.5x device pixels is plenty and saves GPU fill
+    // (battery) on high-density phones. Text stays sharper at up to 2x.
+    this.renderer.resize(w, h, Math.min(dpr, 1.5));
+    this.labels.resize(w, h, Math.min(dpr, 2));
     this.view.setSize(w, h, dpr);
     this.requestFrame();
   }

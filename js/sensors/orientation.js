@@ -177,16 +177,18 @@ export class OrientationTracker {
     if (this.qRel) this._feedYaw(yawBetween(this.qRel, q), now, 1);
   }
 
-  // iOS: webkitCompassHeading is the heading of the back camera when the phone is
-  // held up and of the top edge when it lies flat; only trust it where both agree.
+  // iOS: webkitCompassHeading is the heading of the top edge when the phone lies
+  // flat and of the back camera when it is held up. Trust it where that is
+  // unambiguous: lying flat, or held up where both directions agree.
   _compass(qRel, heading) {
     const back = backHeading(qRel), top = topHeading(qRel);
+    const flat = back.horiz < 0.3 && top.horiz > 0.9;
     const agree = back.horiz > 0.3 && top.horiz > 0.3 && Math.abs(wrapPi(back.h - top.h)) < 35 * DEG;
-    const usable = agree || (this.yaw === null && back.horiz > 0.3);
-    if (!usable) return;
+    const first = this.yaw === null && back.horiz > 0.3;
+    if (!flat && !agree && !first) return;
     this.headingSource = 'compass';
-    const relHeading = back.horiz > 0.3 ? back.h : top.h;
-    this._feedYaw(wrapPi(relHeading - heading), performance.now(), agree ? 1 : 0.3);
+    const relHeading = flat ? top.h : back.h;
+    this._feedYaw(wrapPi(relHeading - heading), performance.now(), 1);
   }
 
   _feedYaw(measured, now, weight) {

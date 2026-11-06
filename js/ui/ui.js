@@ -252,18 +252,13 @@ export class UI {
     const app = this.app, cons = app.cons;
     const rows = [];
     const conName = (c) => (c >= 0 ? cons.name[c] : '');
+    const type = info.item.type;
     let sub = '';
-    if (info.kind === 'star') {
-      sub = `${info.hasName ? info.designation + ' · ' : ''}Star in ${conName(info.con)}`;
-    } else if (info.kind === 'planet') {
-      sub = `Planet in ${conName(info.con)}`;
-    } else if (info.kind === 'moon') {
-      sub = `${info.phaseName} in ${conName(info.con)}`;
-    } else if (info.item.type === 'body' && info.item.id === 'sun') {
-      sub = `Our star, in ${conName(info.con)}`;
-    } else if (info.kind === 'constellation') {
-      sub = `Constellation · ${info.meaning}`;
-    }
+    if (type === 'star') sub = `${info.hasName ? info.designation + ' · ' : ''}Star in ${conName(info.con)}`;
+    else if (type === 'con') sub = `Constellation · ${info.meaning}`;
+    else if (info.item.id === 'sun') sub = `Our star, in ${conName(info.con)}`;
+    else if (info.item.id === 'moon') sub = `${info.phaseName} in ${conName(info.con)}`;
+    else sub = `Planet in ${conName(info.con)}`;
     if (info.mag !== undefined) rows.push(['Magnitude', formatMag(info.mag)]);
     const altText = `${Math.round(info.alt * RAD)}°${info.below ? ' (below horizon)' : ''}`;
     rows.push(['Altitude', altText]);
@@ -282,19 +277,19 @@ export class UI {
       }
       if (rs.transit && rs.transitAlt > 0) rows.push(['Highest', `${formatEventTime(rs.transit, ref)} at ${Math.round(rs.transitAlt * RAD)}°`]);
     }
-    if (info.kind === 'moon') rows.push(['Illuminated', `${Math.round(info.phase * 100)}%`]);
+    if (info.item.id === 'moon') rows.push(['Illuminated', `${Math.round(info.phase * 100)}%`]);
     else if (info.kind === 'planet' && info.phase < 0.985) rows.push(['Illuminated', `${Math.round(info.phase * 100)}%`]);
     if (info.distKm) rows.push(['Distance', formatDistanceKm(info.distKm)]);
     if (info.diameter) {
       const arcsec = info.diameter * RAD * 3600;
       rows.push(['Apparent size', arcsec > 120 ? `${(arcsec / 60).toFixed(1)}′` : `${arcsec.toFixed(1)}″`]);
     }
-    if (info.kind === 'star') {
+    if (type === 'star') {
       if (info.sp) rows.push(['Type', `${describeSpectrum(info.sp) || 'Star'} (${info.sp})`]);
       rows.push(['Catalogue', `HR ${info.hr}`]);
     }
     if (info.radec) rows.push(['RA / Dec', `${formatRA(info.radec.ra)} · ${formatDec(info.radec.dec)}`]);
-    if (info.kind === 'constellation') {
+    if (type === 'con') {
       rows.push(['Abbreviation', `${info.abbr} (${info.gen})`]);
       if (info.brightest) rows.push(['Brightest star', info.brightest]);
     }

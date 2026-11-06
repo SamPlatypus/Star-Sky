@@ -15,7 +15,7 @@ const PALETTES = {
   },
 };
 
-const CELL = 10;
+const CELL = 4;
 
 export class LabelLayer {
   constructor(canvas) {

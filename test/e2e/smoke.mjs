@@ -199,6 +199,32 @@ await check('motion mode follows simulated device orientation (with declination)
   await ctx.close();
 });
 
+await check('iOS-style compass heading (relative events + webkitCompassHeading) sets true north', async () => {
+  const { ctx, page } = await newPage(browser, { permissions: SENSORS });
+  // Arbitrary relative yaw (alpha 37); the compass says the camera faces 200 deg magnetic.
+  const feed = (ms) => page.evaluate(async (ms) => {
+    const t0 = performance.now();
+    while (performance.now() - t0 < ms) {
+      const e = new DeviceOrientationEvent('deviceorientation', { alpha: 37, beta: 60, gamma: 0, absolute: false });
+      Object.defineProperty(e, 'webkitCompassHeading', { value: 200 });
+      Object.defineProperty(e, 'webkitCompassAccuracy', { value: 10 });
+      window.dispatchEvent(e);
+      await new Promise((r) => setTimeout(r, 16));
+    }
+  }, ms);
+  const feeding = feed(1500);
+  await page.click('#btn-motion');
+  await feeding;
+  await page.waitForFunction(() => window.starSky.mode === 'sensor');
+  await feed(500);
+  const v = await page.evaluate(() => ({ az: window.starSky.heading, alt: window.starSky.view.centerAltAz().alt * 180 / Math.PI,
+    dec: window.starSky.tracker.declination, src: window.starSky.tracker.headingSource }));
+  assert.equal(v.src, 'compass');
+  assert.ok(Math.abs(((v.az - (200 + v.dec) + 540) % 360) - 180) < 0.5, `heading ${v.az}`);
+  assert.ok(Math.abs(v.alt + 30) < 0.5, `altitude ${v.alt}`);
+  await ctx.close();
+});
+
 await check('motion button without sensor data falls back to drag mode', async () => {
   const { ctx, page } = await newPage(browser, { permissions: SENSORS });
   await page.click('#btn-motion');
