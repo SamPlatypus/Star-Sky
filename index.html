@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#000000">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="Offline planetarium: stars, constellations, the Moon and planets in real time, with motion tracking and camera overlay.">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Star Sky">
+  <title>Star Sky</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <div id="stage" aria-label="Sky view">
+    <video id="camera" playsinline muted autoplay></video>
+    <div id="camera-tint"></div>
+    <canvas id="sky"></canvas>
+    <canvas id="labels"></canvas>
+  </div>
+
+  <div id="hud">
+    <header class="topbar">
+      <button id="btn-when" class="pill" aria-label="Time and place">
+        <span id="when-time">--:--</span>
+        <span id="when-place" class="muted">…</span>
+      </button>
+      <div class="topbar-right">
+        <span id="heading-readout" class="pill small" hidden></span>
+        <button id="btn-night" class="icon-btn" aria-label="Red light mode" aria-pressed="false">
+          <svg viewBox="0 0 24 24"><path d="M12 5C6.5 5 2.7 9.6 1.6 11.4a1.2 1.2 0 0 0 0 1.2C2.7 14.4 6.5 19 12 19s9.3-4.6 10.4-6.4a1.2 1.2 0 0 0 0-1.2C21.3 9.6 17.5 5 12 5Z" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="12" cy="12" r="3.4" fill="currentColor"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <div id="calib-banner" class="banner" hidden>
+      <p><strong>Calibrate direction</strong><br>Drag left or right until the sky lines up with reality, or point the back of the phone at true north and tap “This is north”.</p>
+      <div class="row">
+        <button id="calib-north" class="btn">This is north</button>
+        <button id="calib-reset" class="btn ghost">Reset</button>
+        <button id="calib-done" class="btn primary">Done</button>
+      </div>
+    </div>
+
+    <div id="toast" role="status" aria-live="polite"></div>
+
+    <section id="info" class="card" hidden aria-live="polite">
+      <div class="card-head">
+        <div>
+          <h2 id="info-title"></h2>
+          <p id="info-sub" class="muted"></p>
+        </div>
+        <button id="info-close" class="icon-btn small" aria-label="Close">
+          <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+      <dl id="info-rows"></dl>
+      <div class="row">
+        <button id="info-center" class="btn">Show me</button>
+      </div>
+    </section>
+
+    <nav class="toolbar" aria-label="Main">
+      <button id="btn-motion" class="tool" aria-pressed="false">
+        <svg viewBox="0 0 24 24"><rect x="7" y="2.5" width="10" height="19" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M3.5 8.5a9 9 0 0 0 0 7M20.5 8.5a9 9 0 0 1 0 7" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        <span>Motion</span>
+      </button>
+      <button id="btn-camera" class="tool" aria-pressed="false">
+        <svg viewBox="0 0 24 24"><path d="M4 7.5h3l1.6-2.2h6.8L17 7.5h3a1.5 1.5 0 0 1 1.5 1.5v9A1.5 1.5 0 0 1 20 19.5H4A1.5 1.5 0 0 1 2.5 18V9A1.5 1.5 0 0 1 4 7.5Z" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="12" cy="13" r="3.6" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
+        <span>Camera</span>
+      </button>
+      <button id="btn-cons" class="tool" aria-pressed="true">
+        <svg viewBox="0 0 24 24"><path d="M4 17 9 7l6 4 5-6" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="4" cy="17" r="2" fill="currentColor"/><circle cx="9" cy="7" r="2" fill="currentColor"/><circle cx="15" cy="11" r="2" fill="currentColor"/><circle cx="20" cy="5" r="2" fill="currentColor"/></svg>
+        <span>Figures</span>
+      </button>
+      <button id="btn-search" class="tool">
+        <svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="m15.5 15.5 5 5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+        <span>Find</span>
+      </button>
+      <button id="btn-menu" class="tool">
+        <svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+        <span>More</span>
+      </button>
+    </nav>
+
+    <!-- Bottom sheets -->
+    <section id="sheet-search" class="sheet" hidden aria-label="Find">
+      <div class="sheet-head"><h2>Find</h2><button class="icon-btn small sheet-close" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button></div>
+      <input id="search-input" type="search" placeholder="Planet, star or constellation" autocomplete="off" spellcheck="false">
+      <ul id="search-results" class="list"></ul>
+    </section>
+
+    <section id="sheet-time" class="sheet" hidden aria-label="Time and place">
+      <div class="sheet-head"><h2>Time</h2><button class="icon-btn small sheet-close" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button></div>
+      <p id="time-full" class="big"></p>
+      <div class="grid-buttons">
+        <button class="btn" data-step="-86400000">−1 day</button>
+        <button class="btn" data-step="-3600000">−1 h</button>
+        <button class="btn" data-step="-600000">−10 min</button>
+        <button class="btn" data-step="600000">+10 min</button>
+        <button class="btn" data-step="3600000">+1 h</button>
+        <button class="btn" data-step="86400000">+1 day</button>
+      </div>
+      <div class="row">
+        <label class="field grow"><span>Go to</span><input id="time-input" type="datetime-local"></label>
+        <button id="time-now" class="btn primary">Now</button>
+      </div>
+      <div class="sheet-head"><h2>Location</h2></div>
+      <p id="loc-current"></p>
+      <div class="row">
+        <button id="loc-gps" class="btn">Use device location</button>
+      </div>
+      <input id="loc-search" type="search" placeholder="Search city" autocomplete="off" spellcheck="false">
+      <ul id="loc-results" class="list"></ul>
+      <details>
+        <summary>Enter coordinates</summary>
+        <div class="row">
+          <label class="field"><span>Latitude</span><input id="loc-lat" type="number" step="0.01" min="-90" max="90" inputmode="decimal"></label>
+          <label class="field"><span>Longitude</span><input id="loc-lon" type="number" step="0.01" min="-180" max="180" inputmode="decimal"></label>
+          <button id="loc-apply" class="btn">Set</button>
+        </div>
+      </details>
+      <p class="muted small">Your location never leaves this device.</p>
+    </section>
+
+    <section id="sheet-menu" class="sheet" hidden aria-label="Settings">
+      <div class="sheet-head"><h2>Display</h2><button class="icon-btn small sheet-close" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button></div>
+      <label class="slider">
+        <span>Faintest stars <output id="mag-out"></output></span>
+        <input id="mag-limit" type="range" min="1" max="6.5" step="0.1">
+        <small class="muted">Fainter stars appear as you zoom in.</small>
+      </label>
+      <div class="toggles">
+        <label class="toggle"><input type="checkbox" data-setting="showConLines"><span>Constellation figures</span></label>
+        <label class="toggle"><input type="checkbox" data-setting="showConNames"><span>Constellation names</span></label>
+        <label class="toggle"><input type="checkbox" data-setting="showStarNames"><span>Star names</span></label>
+        <label class="toggle"><input type="checkbox" data-setting="belowHorizon"><span>Objects below the horizon</span></label>
+        <label class="toggle"><input type="checkbox" data-setting="daylight"><span>Daylight sky</span></label>
+        <label class="toggle"><input type="checkbox" data-setting="showAltAzGrid"><span>Altitude / azimuth grid</span></label>
+        <label class="toggle"><input type="checkbox" data-setting="showEqGrid"><span>Equatorial grid</span></label>
+        <label class="toggle"><input type="checkbox" data-setting="showEcliptic"><span>Ecliptic</span></label>
+        <label class="toggle"><input type="checkbox" data-setting="night"><span>Red light mode</span></label>
+        <label class="toggle"><input type="checkbox" data-setting="keepAwake"><span>Keep screen on</span></label>
+      </div>
+      <div class="sheet-head"><h2>Sensors</h2></div>
+      <div class="row wrap">
+        <button id="menu-calibrate" class="btn">Calibrate direction</button>
+        <button id="menu-time" class="btn">Time &amp; location</button>
+      </div>
+      <label class="slider">
+        <span>Camera field of view <output id="camfov-out"></output></span>
+        <input id="cam-fov" type="range" min="30" max="110" step="1">
+        <small class="muted">Match the overlay to your camera (or pinch in camera view).</small>
+      </label>
+      <div class="sheet-head"><h2>About</h2></div>
+      <p class="small muted">Star Sky works entirely offline. No account, no tracking, no network requests. Star data: Yale Bright Star Catalogue (Hoffleit &amp; Warren). Star names: IAU WGSN. Constellation figures: d3-celestial (Olaf Frohn). Magnetic model: NOAA WMM2025. Cities: Natural Earth.</p>
+      <p class="small muted" id="about-version"></p>
+    </section>
+
+    <section id="welcome" class="sheet" hidden aria-label="Welcome">
+      <h2>Welcome to Star Sky</h2>
+      <p>Showing the sky over <strong id="welcome-place"></strong>, estimated from your time zone.</p>
+      <ul class="tips small">
+        <li>Drag to look around, pinch to zoom, tap anything for details.</li>
+        <li><b>Motion</b> follows your phone, <b>Camera</b> overlays the sky on the live view.</li>
+        <li>The eye button switches to red light to protect your night vision.</li>
+      </ul>
+      <div class="row wrap">
+        <button id="welcome-gps" class="btn primary">Use my location</button>
+        <button id="welcome-city" class="btn">Choose a city</button>
+        <button id="welcome-ok" class="btn ghost">Start</button>
+      </div>
+    </section>
+
+    <div id="fatal" hidden></div>
+  </div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

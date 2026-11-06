@@ -1,0 +1,19 @@
+{
+  "name": "star-sky",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Offline planetarium for phones: real-time night sky with sensor and camera overlay modes.",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "start": "http-server -c-1 -p 8080 .",
+    "test": "node --test test/*.test.mjs",
+    "test:e2e": "node test/e2e/smoke.mjs",
+    "build:data": "node tools/build-data.mjs",
+    "build:icons": "node tools/make-icons.mjs",
+    "build:sw": "node tools/build-sw.mjs"
+  },
+  "devDependencies": {
+    "astronomy-engine": "2.1.19"
+  }
+}
