@@ -58,7 +58,6 @@ const LINE_COLORS = {
 };
 
 const easeInOut = (t) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);
-const smooth01 = (x) => { const t = clamp(x, 0, 1); return t * t * (3 - 2 * t); };
 
 export class App {
   constructor(el) {
@@ -354,6 +353,11 @@ export class App {
     }
     document.documentElement.classList.add('camera');
     this.el.video.addEventListener('loadedmetadata', () => this.requestFrame(), { once: true });
+    if (!this.settings.cameraHintShown) {
+      this.toast('Drag sideways to line the sky up with the view; pinch to match the camera’s zoom.');
+      this.settings.cameraHintShown = true;
+      this.scheduleSave();
+    }
     this.emit('mode');
     this.requestFrame();
   }
@@ -745,22 +749,31 @@ export class App {
     return { x: p.x, y: p.y, r, onScreen: true, text };
   }
 
+  /**
+   * Object under a tap. Bright objects get a generous touch radius, faint stars
+   * a small one, so tapping dark sky reports the constellation instead.
+   */
   pick(x, y) {
     const v = this.view, p = {};
-    let best = null, bestScore = 28;
+    let best = null, bestScore = 1;
     for (const [id, sp] of Object.entries(this.bodyScreen || {})) {
-      const d = Math.hypot(sp.x - x, sp.y - y) - Math.max(0, sp.r - 4) - 6;
-      if (d < bestScore) { bestScore = d; best = { type: 'body', id }; }
+      const radius = Math.max(32, sp.r + 14);
+      const score = Math.hypot(sp.x - x, sp.y - y) / radius - 0.3; // prefer the Moon and planets
+      if (score < bestScore) { bestScore = score; best = { type: 'body', id }; }
     }
     const { lim } = this.starParams();
     const n = this.stars.countBrighterThan(lim);
     const below = this.settings.belowHorizon;
     for (let i = 0; i < n; i++) {
+      const m = this.stars.mag[i];
+      const radius = m < 1.5 ? 30 : m < 3 ? 24 : m < 4.5 ? 17 : 12;
       const enu = v.eqToEnu(this.stars.vector(i));
       if (enu[2] < 0 && !below) continue;
       if (!v.project(enu, p)) continue;
-      const d = Math.hypot(p.x - x, p.y - y) - (lim - this.stars.mag[i]) * 1.2;
-      if (d < bestScore) { bestScore = d; best = { type: 'star', index: i }; }
+      const dx = p.x - x, dy = p.y - y;
+      if (Math.abs(dx) > radius || Math.abs(dy) > radius) continue;
+      const score = Math.hypot(dx, dy) / radius - 0.04 * (lim - m);
+      if (score < bestScore) { bestScore = score; best = { type: 'star', index: i }; }
     }
     if (best) return best;
     // Empty sky: report the constellation under the finger.

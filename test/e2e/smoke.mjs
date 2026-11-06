@@ -157,6 +157,43 @@ await check('tapping a star opens its info card; Find centres a planet', async (
   await ctx.close();
 });
 
+await check('device location (GPS) sets the observer and names the nearest city', async () => {
+  const { ctx, page } = await newPage(browser, { permissions: ['geolocation'], geolocation: { latitude: 48.86, longitude: 2.35 } });
+  await page.click('#btn-when');
+  await page.click('#loc-gps');
+  await page.waitForFunction(() => window.starSky.settings.location.source === 'gps');
+  const loc = await page.evaluate(() => window.starSky.settings.location);
+  assert.equal(loc.lat, 48.86);
+  assert.match(loc.name, /Paris/);
+  assert.match(await page.textContent('#when-place'), /Paris/);
+  await ctx.close();
+});
+
+await check('recovers from a lost WebGL context', async () => {
+  const { ctx, page } = await newPage(browser);
+  const ok = await page.evaluate(async () => {
+    const a = window.starSky;
+    const ext = a.renderer.gl.getExtension('WEBGL_lose_context');
+    ext.loseContext();
+    await new Promise((r) => setTimeout(r, 200));
+    ext.restoreContext();
+    await new Promise((r) => setTimeout(r, 400));
+    a.setTime(new Date('2026-12-15T23:00:00Z'));
+    const i = [...a.stars.names.entries()].find(([, n]) => n === 'Sirius')[0];
+    const enu = a.view.eqToEnu(a.stars.vector(i));
+    a.az = Math.atan2(enu[0], enu[1]); a.alt = Math.asin(enu[2]); a.fov = 0.5;
+    a.view.setFromAltAz(a.az, a.alt); a.applyProjection();
+    const p = {}; a.view.project(enu, p);
+    a.draw();
+    const px = a.renderer.readPixel(p.x, p.y);
+    return { lost: a.renderer.lost, bright: px[0] + px[1] + px[2] };
+  });
+  assert.equal(ok.lost, false);
+  assert.ok(ok.bright > 300, `Sirius not drawn after restore (${ok.bright})`);
+  assert.deepEqual(page.errors.filter((e) => !/service ?worker/i.test(e)), []);
+  await ctx.close();
+});
+
 await check('red-light mode turns the interface and sky red', async () => {
   const { ctx, page } = await newPage(browser);
   await page.click('#btn-night');
