@@ -251,8 +251,11 @@
                 let imag = 0;
                 for (let k = 0; k < N; k++) {
                     const phi = (2 * Math.PI * n * k) / N;
-                    real += pts[k].x * Math.cos(phi) + pts[k].y * Math.sin(phi);
-                    imag += -pts[k].x * Math.sin(phi) + pts[k].y * Math.cos(phi);
+                    // Measure from the canvas centre, where the epicycles start drawing
+                    const px = pts[k].x - width / 2;
+                    const py = pts[k].y - height / 2;
+                    real += px * Math.cos(phi) + py * Math.sin(phi);
+                    imag += -px * Math.sin(phi) + py * Math.cos(phi);
                 }
                 real /= N;
                 imag /= N;
