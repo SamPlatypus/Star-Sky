@@ -1,0 +1,14 @@
+{
+  "name": "fourier-toy-build",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Builds the offline, single-file Fourier Epicycles Toy from source.html.",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "devDependencies": {
+    "@fontsource/inter": "5.1.1",
+    "tailwindcss": "3.4.17"
+  }
+}

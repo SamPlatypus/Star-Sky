@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Fourier Series Mobile Toy</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Google Fonts Inter -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            touch-action: none;
+            overscroll-behavior: none;
+        }
+        .glass-panel {
+            background: rgba(15, 23, 42, 0.75);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        .slider-thumb::-webkit-slider-thumb {
+            appearance: none;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: #ec4899;
+            cursor: pointer;
+            box-shadow: 0 0 10px rgba(236, 72, 153, 0.5);
+        }
+    </style>
+</head>
+<body class="bg-slate-950 text-slate-100 h-screen w-screen flex flex-col overflow-hidden select-none">
+
+    <!-- Top Navigation & Status Bar -->
+    <header class="flex items-center justify-between px-4 py-3 glass-panel z-10 border-b border-slate-800">
+        <div class="flex items-center space-x-2">
+            <div class="w-3 h-3 rounded-full bg-pink-500 animate-pulse"></div>
+            <h1 class="font-bold text-base md:text-lg tracking-wide bg-gradient-to-r from-pink-400 via-purple-400 to-indigo-400 bg-clip-text text-transparent">
+                Fourier Epicycles Toy
+            </h1>
+        </div>
+        <div id="mode-badge" class="px-3 py-1 rounded-full text-xs font-semibold bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+            Mode: Preset
+        </div>
+    </header>
+
+    <!-- Main Canvas Container -->
+    <main class="flex-1 relative flex items-center justify-center bg-slate-950 overflow-hidden">
+        <canvas id="canvas" class="absolute inset-0 w-full h-full cursor-crosshair"></canvas>
+
+        <!-- Instructional Overlay for Draw Mode -->
+        <div id="draw-instruction" class="absolute top-4 pointer-events-none transition-opacity duration-300 opacity-0 bg-slate-900/80 px-4 py-2 rounded-xl border border-slate-700 text-xs text-pink-300 shadow-xl">
+            ✏️ Draw your shape on the screen with your finger!
+        </div>
+    </main>
+
+    <!-- Bottom Controls Control Panel -->
+    <nav class="glass-panel p-4 z-10 flex flex-col space-y-3 rounded-t-3xl border-t border-slate-800 shadow-2xl">
+
+        <!-- Primary Action Buttons Row -->
+        <div class="grid grid-cols-4 gap-2">
+            <button id="btn-play" class="flex flex-col items-center justify-center py-2.5 px-1 bg-gradient-to-r from-pink-600 to-purple-600 hover:from-pink-500 hover:to-purple-500 active:scale-95 text-white font-medium rounded-xl shadow-lg shadow-pink-500/20 transition-all text-xs">
+                <svg id="play-icon" class="w-5 h-5 mb-1" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                <span id="play-text">Pause</span>
+            </button>
+            <button id="btn-draw-mode" class="flex flex-col items-center justify-center py-2.5 px-1 bg-slate-800 hover:bg-slate-700 active:scale-95 text-slate-200 font-medium rounded-xl border border-slate-700 transition-all text-xs">
+                <svg class="w-5 h-5 mb-1 text-pink-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"/></svg>
+                Draw Custom
+            </button>
+            <button id="btn-clear" class="flex flex-col items-center justify-center py-2.5 px-1 bg-slate-800 hover:bg-slate-700 active:scale-95 text-slate-200 font-medium rounded-xl border border-slate-700 transition-all text-xs">
+                <svg class="w-5 h-5 mb-1 text-red-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                Clear Trail
+            </button>
+            <button id="btn-presets" class="flex flex-col items-center justify-center py-2.5 px-1 bg-slate-800 hover:bg-slate-700 active:scale-95 text-slate-200 font-medium rounded-xl border border-slate-700 transition-all text-xs relative">
+                <svg class="w-5 h-5 mb-1 text-cyan-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 12h16M4 18h7"/></svg>
+                Presets ▾
+            </button>
+        </div>
+
+        <!-- Preset Selector Dropdown Modal / Popup (Hidden by default) -->
+        <div id="preset-menu" class="hidden absolute bottom-24 left-4 right-4 glass-panel p-3 rounded-2xl grid grid-cols-2 sm:grid-cols-4 gap-2 shadow-2xl border border-slate-700 z-30">
+            <button data-preset="heart" class="preset-btn p-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-xs font-medium text-pink-300 border border-slate-800 text-center">💖 Heart</button>
+            <button data-preset="star" class="preset-btn p-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-xs font-medium text-amber-300 border border-slate-800 text-center">⭐ Star</button>
+            <button data-preset="infinity" class="preset-btn p-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-xs font-medium text-cyan-300 border border-slate-800 text-center">♾️ Infinity</button>
+            <button data-preset="spiral" class="preset-btn p-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-xs font-medium text-purple-300 border border-slate-800 text-center">🌀 Spiral</button>
+        </div>
+
+        <!-- Sliders for Terms and Speed -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
+            <!-- Term Count Slider -->
+            <div class="flex flex-col space-y-1">
+                <div class="flex justify-between text-xs text-slate-400 px-1">
+                    <span>Epicycles (Terms): <strong id="val-terms" class="text-pink-400">40</strong></span>
+                    <span>Max: 120</span>
+                </div>
+                <input id="slider-terms" type="range" min="2" max="120" value="40"
+                    class="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer slider-thumb accent-pink-500">
+            </div>
+
+            <!-- Playback Speed Slider -->
+            <div class="flex flex-col space-y-1">
+                <div class="flex justify-between text-xs text-slate-400 px-1">
+                    <span>Playback Speed: <strong id="val-speed" class="text-indigo-400">1.0x</strong></span>
+                </div>
+                <input id="slider-speed" type="range" min="0.2" max="3.0" step="0.1" value="1.0"
+                    class="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer slider-thumb accent-indigo-500">
+            </div>
+        </div>
+    </nav>
+
+    <!-- Custom Notification Toast -->
+    <div id="toast" class="fixed top-16 left-1/2 transform -translate-x-1/2 bg-slate-900/90 text-slate-200 px-4 py-2 rounded-xl border border-slate-700 text-xs shadow-2xl transition-opacity duration-300 opacity-0 pointer-events-none z-50">
+        Notification message
+    </div>
+
+    <!-- Application JavaScript Logic -->
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        // UI Elements
+        const btnPlay = document.getElementById('btn-play');
+        const playIcon = document.getElementById('play-icon');
+        const playText = document.getElementById('play-text');
+        const btnDrawMode = document.getElementById('btn-draw-mode');
+        const btnClear = document.getElementById('btn-clear');
+        const btnPresets = document.getElementById('btn-presets');
+        const presetMenu = document.getElementById('preset-menu');
+        const sliderTerms = document.getElementById('slider-terms');
+        const valTerms = document.getElementById('val-terms');
+        const sliderSpeed = document.getElementById('slider-speed');
+        const valSpeed = document.getElementById('val-speed');
+        const modeBadge = document.getElementById('mode-badge');
+        const drawInstruction = document.getElementById('draw-instruction');
+        const toast = document.getElementById('toast');
+
+        // State Variables
+        let width = 0;
+        let height = 0;
+        let isPlaying = true;
+        let isDrawing = false;
+        let mode = 'preset'; // 'preset', 'animating_custom', 'drawing'
+        let time = 0;
+        let speed = 1.0;
+        let maxTerms = 40;
+
+        let rawPoints = [];     // Drawn points by user
+        let sampledPoints = []; // Resampled path for DFT
+        let fourierCoeffs = []; // Computed Fourier coefficients
+        let trail = [];         // Reconstructed path history
+
+        // Resize Canvas with Retina support
+        function resizeCanvas() {
+            const dpr = window.devicePixelRatio || 1;
+            width = canvas.parentElement.clientWidth;
+            height = canvas.parentElement.clientHeight;
+            canvas.width = width * dpr;
+            canvas.height = height * dpr;
+            ctx.scale(dpr, dpr);
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        // Show Toast Notification
+        function showToast(msg) {
+            toast.textContent = msg;
+            toast.style.opacity = '1';
+            setTimeout(() => {
+                toast.style.opacity = '0';
+            }, 2500);
+        }
+
+        // Preset Shape Generators
+        function generatePreset(type) {
+            const points = [];
+            const numSamples = 200;
+            const cx = width / 2;
+            const cy = height / 2;
+            const scale = Math.min(width, height) * 0.25;
+
+            for (let i = 0; i < numSamples; i++) {
+                const t = (i / numSamples) * 2 * Math.PI;
+                let x = 0, y = 0;
+
+                if (type === 'heart') {
+                    // Parametric heart
+                    x = 16 * Math.pow(Math.sin(t), 3);
+                    y = -(13 * Math.cos(t) - 5 * Math.cos(2*t) - 2 * Math.cos(3*t) - Math.cos(4*t));
+                    x *= scale / 16;
+                    y *= scale / 16;
+                } else if (type === 'star') {
+                    // 5-pointed star
+                    const r = (i % 2 === 0) ? scale : scale * 0.4;
+                    const angle = t - Math.PI / 2;
+                    // Let's use smooth parametric star or polygon
+                    const R = scale;
+                    const r_inner = scale * 0.45;
+                    const k = 5;
+                    const theta = t * k;
+                    x = cx + (R * 0.75 + r_inner * 0.25 * Math.cos(theta)) * Math.cos(t);
+                    y = cy + (R * 0.75 + r_inner * 0.25 * Math.cos(theta)) * Math.sin(t);
+                    points.push({ x: cx + x - cx, y: cy + y - cy });
+                    continue;
+                } else if (type === 'infinity') {
+                    // Lemniscate of Bernoulli
+                    const a = scale * 1.4;
+                    const denom = 1 + Math.sin(t) * Math.sin(t);
+                    x = (a * Math.cos(t)) / denom;
+                    y = (a * Math.sin(t) * Math.cos(t)) / denom;
+                } else if (type === 'spiral') {
+                    const r = scale * (1 - i / numSamples);
+                    x = r * Math.cos(t * 3);
+                    y = r * Math.sin(t * 3);
+                }
+
+                points.push({ x: cx + x, y: cy + y });
+            }
+
+            if (type === 'star') {
+                // Analytical Star Points
+                points.length = 0;
+                for (let i = 0; i < numSamples; i++) {
+                    const angle = (i / numSamples) * 2 * Math.PI;
+                    const r = scale * (0.6 + 0.4 * Math.sin(5 * angle));
+                    points.push({
+                        x: cx + r * Math.cos(angle),
+                        y: cy + r * Math.sin(angle)
+                    });
+                }
+            }
+
+            return points;
+        }
+
+        // Discrete Fourier Transform (DFT) Calculation
+        function computeDFT(pts) {
+            const N = pts.length;
+            const coeffs = [];
+            const K = Math.floor(N / 2);
+
+            for (let n = -K; n <= K; n++) {
+                let real = 0;
+                let imag = 0;
+                for (let k = 0; k < N; k++) {
+                    const phi = (2 * Math.PI * n * k) / N;
+                    real += pts[k].x * Math.cos(phi) + pts[k].y * Math.sin(phi);
+                    imag += -pts[k].x * Math.sin(phi) + pts[k].y * Math.cos(phi);
+                }
+                real /= N;
+                imag /= N;
+
+                let freq = n;
+                let amp = Math.sqrt(real * real + imag * imag);
+                let phase = Math.atan2(imag, real);
+                coeffs.push({ freq, amp, phase, real, imag });
+            }
+
+            // Sort coefficients by amplitude in descending order for optimal epicycle stacking
+            coeffs.sort((a, b) => b.amp - a.amp);
+            return coeffs;
+        }
+
+        // Load Preset shape
+        function loadPresetShape(name) {
+            sampledPoints = generatePreset(name);
+            fourierCoeffs = computeDFT(sampledPoints);
+            time = 0;
+            trail = [];
+            mode = 'preset';
+            modeBadge.textContent = `Mode: ${name.charAt(0).toUpperCase() + name.slice(1)}`;
+            showToast(`Loaded ${name} preset!`);
+        }
+
+        // Initialize with heart preset
+        loadPresetShape('heart');
+
+        // --- Touch and Mouse Drawing Listeners ---
+        function getEventPos(e) {
+            const rect = canvas.getBoundingClientRect();
+            const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+            const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+            return { x: clientX - rect.left, y: clientY - rect.top };
+        }
+
+        canvas.addEventListener('mousedown', (e) => startDrawing(getEventPos(e)));
+        canvas.addEventListener('mousemove', (e) => drawMove(getEventPos(e)));
+        window.addEventListener('mouseup', endDrawing);
+
+        canvas.addEventListener('touchstart', (e) => {
+            if (mode === 'drawing') {
+                e.preventDefault();
+                startDrawing(getEventPos(e));
+            }
+        }, { passive: false });
+
+        canvas.addEventListener('touchmove', (e) => {
+            if (mode === 'drawing') {
+                e.preventDefault();
+                drawMove(getEventPos(e));
+            }
+        }, { passive: false });
+
+        window.addEventListener('touchend', () => {
+            if (mode === 'drawing') {
+                endDrawing();
+            }
+        });
+
+        function startDrawing(pos) {
+            if (mode !== 'drawing') return;
+            isDrawing = true;
+            rawPoints = [pos];
+            trail = [];
+        }
+
+        function drawMove(pos) {
+            if (!isDrawing || mode !== 'drawing') return;
+            rawPoints.push(pos);
+        }
+
+        function endDrawing() {
+            if (!isDrawing || mode !== 'drawing') return;
+            isDrawing = false;
+            if (rawPoints.length > 10) {
+                // Resample points to ensure smooth spacing
+                sampledPoints = resamplePoints(rawPoints, 200);
+                fourierCoeffs = computeDFT(sampledPoints);
+                time = 0;
+                trail = [];
+                mode = 'animating_custom';
+                modeBadge.textContent = 'Mode: Custom Drawing';
+                drawInstruction.style.opacity = '0';
+                showToast('Fourier series computed from your drawing!');
+            } else {
+                showToast('Drawing too short! Try again.');
+            }
+        }
+
+        // Resample drawn points to fixed count for consistent DFT
+        function resamplePoints(pts, targetCount) {
+            let totalDist = 0;
+            const dists = [0];
+            for (let i = 1; i < pts.length; i++) {
+                const dx = pts[i].x - pts[i-1].x;
+                const dy = pts[i].y - pts[i-1].y;
+                totalDist += Math.sqrt(dx*dx + dy*dy);
+                dists.push(totalDist);
+            }
+
+            const resampled = [];
+            for (let i = 0; i < targetCount; i++) {
+                const targetDist = (i / targetCount) * totalDist;
+                // Find segment
+                let idx = 1;
+                while (idx < dists.length && dists[idx] < targetDist) {
+                    idx++;
+                }
+                if (idx >= dists.length) {
+                    resampled.push(pts[pts.length - 1]);
+                    continue;
+                }
+                const prevDist = dists[idx - 1];
+                const segDist = dists[idx] - prevDist;
+                const t = segDist === 0 ? 0 : (targetDist - prevDist) / segDist;
+
+                const x = pts[idx-1].x + t * (pts[idx].x - pts[idx-1].x);
+                const y = pts[idx-1].y + t * (pts[idx].y - pts[idx-1].y);
+                resampled.push({ x, y });
+            }
+            return resampled;
+        }
+
+        // --- Main Animation & Rendering Loop ---
+        function animate() {
+            // Clear screen
+            ctx.fillStyle = '#020617';
+            ctx.fillRect(0, 0, width, height);
+
+            if (mode === 'drawing') {
+                // Render user drawing guide
+                ctx.strokeStyle = '#ec4899';
+                ctx.lineWidth = 3;
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+                ctx.beginPath();
+                for (let i = 0; i < rawPoints.length; i++) {
+                    if (i === 0) ctx.moveTo(rawPoints[i].x, rawPoints[i].y);
+                    else ctx.lineTo(rawPoints[i].x, rawPoints[i].y);
+                }
+                ctx.stroke();
+
+                requestAnimationFrame(animate);
+                return;
+            }
+
+            // If we have coefficients, animate epicycles
+            if (fourierCoeffs.length > 0) {
+                let x = width / 2;
+                let y = height / 2;
+
+                const activeTerms = Math.min(maxTerms, fourierCoeffs.length);
+
+                // Draw epicycle circles and rotating arms
+                for (let i = 0; i < activeTerms; i++) {
+                    const prevX = x;
+                    const prevY = y;
+
+                    const freq = fourierCoeffs[i].freq;
+                    const radius = fourierCoeffs[i].amp;
+                    const phase = fourierCoeffs[i].phase;
+
+                    const angle = freq * time + phase;
+                    x += radius * Math.cos(angle);
+                    y += radius * Math.sin(angle);
+
+                    // Draw epicycle circle
+                    if (radius > 1) {
+                        ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
+                        ctx.lineWidth = 1;
+                        ctx.beginPath();
+                        ctx.arc(prevX, prevY, radius, 0, 2 * Math.PI);
+                        ctx.stroke();
+
+                        // Draw vector arm
+                        ctx.strokeStyle = `hsla(${((i / activeTerms) * 180 + time * 20) % 360}, 80%, 65%, 0.35)`;
+                        ctx.lineWidth = 1.5;
+                        ctx.beginPath();
+                        ctx.moveTo(prevX, prevY);
+                        ctx.lineTo(x, y);
+                        ctx.stroke();
+                    }
+                }
+
+                // Add tip of vector to trail
+                trail.unshift({ x, y });
+                if (trail.length > 400) {
+                    trail.pop();
+                }
+
+                // Draw rainbow spectrum trail
+                ctx.lineWidth = 3;
+                ctx.lineCap = 'round';
+                for (let i = 0; i < trail.length - 1; i++) {
+                    const p1 = trail[i];
+                    const p2 = trail[i+1];
+                    const hue = (i / trail.length) * 360 + (time * 50) % 360;
+                    ctx.strokeStyle = `hsl(${hue}, 90%, 60%)`;
+                    ctx.beginPath();
+                    ctx.moveTo(p1.x, p1.y);
+                    ctx.lineTo(p2.x, p2.y);
+                    ctx.stroke();
+                }
+
+                // Advance time if playing
+                if (isPlaying) {
+                    time += (2 * Math.PI / 250) * speed;
+                    if (time > 2 * Math.PI) {
+                        time = 0;
+                    }
+                }
+            }
+
+            requestAnimationFrame(animate);
+        }
+
+        // --- UI Event Listeners ---
+        btnPlay.addEventListener('click', () => {
+            isPlaying = !isPlaying;
+            if (isPlaying) {
+                playIcon.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z"/>';
+                playText.textContent = 'Pause';
+            } else {
+                playIcon.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/><path stroke-linecap="round" stroke-linejoin="round" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>';
+                playText.textContent = 'Play';
+            }
+        });
+
+        btnDrawMode.addEventListener('click', () => {
+            mode = 'drawing';
+            modeBadge.textContent = 'Mode: Draw Custom';
+            rawPoints = [];
+            trail = [];
+            drawInstruction.style.opacity = '1';
+            showToast('Draw your shape on screen');
+        });
+
+        btnClear.addEventListener('click', () => {
+            trail = [];
+            time = 0;
+            showToast('Trail cleared');
+        });
+
+        btnPresets.addEventListener('click', (e) => {
+            e.stopPropagation();
+            presetMenu.classList.toggle('hidden');
+        });
+
+        document.addEventListener('click', () => {
+            presetMenu.classList.add('hidden');
+        });
+
+        document.querySelectorAll('.preset-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const presetName = e.target.getAttribute('data-preset');
+                loadPresetShape(presetName);
+                presetMenu.classList.add('hidden');
+            });
+        });
+
+        sliderTerms.addEventListener('input', (e) => {
+            maxTerms = parseInt(e.target.value);
+            valTerms.textContent = maxTerms;
+        });
+
+        sliderSpeed.addEventListener('input', (e) => {
+            speed = parseFloat(e.target.value);
+            valSpeed.textContent = speed.toFixed(1) + 'x';
+        });
+
+        // Start animation loop on load
+        window.onload = function() {
+            animate();
+        };
+    </script>
+</body>
+</html>
