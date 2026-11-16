@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // End-to-end smoke test in headless Chromium (Playwright). Serves the repo,
 // then checks rendering, JS/GPU projection agreement, picking, search, red-light
-// mode, simulated motion sensors, camera overlay + denial fallback and offline
-// start-up from the service worker cache.
+// mode, simulated motion sensors (absolute, relative and compass streams), the
+// camera backdrop on its own and together with motion, permission denials, and
+// offline start-up from the service worker cache.
 //   node test/e2e/smoke.mjs [--shots dir]
 import { createServer } from 'node:http';
 import { readFile, mkdir } from 'node:fs/promises';
@@ -43,7 +44,7 @@ async function check(name, fn) {
   catch (err) { results.push(['FAIL', name, err]); console.log(`not ok - ${name}\n  ${String(err.stack || err).split('\n').slice(0, 4).join('\n  ')}`); }
 }
 
-async function newPage(browser, opts = {}) {
+async function newPage(browser, opts = {}, init = null) {
   const ctx = await browser.newContext({
     viewport: { width: 412, height: 860 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true,
     timezoneId: 'Europe/London', serviceWorkers: 'allow', ...opts,
@@ -51,6 +52,7 @@ async function newPage(browser, opts = {}) {
   await ctx.addInitScript(() => {
     if (!localStorage.getItem('starsky.settings.v1')) localStorage.setItem('starsky.settings.v1', JSON.stringify({ onboarded: true }));
   });
+  if (init) await ctx.addInitScript(init);
   const page = await ctx.newPage();
   page.errors = [];
   page.on('pageerror', (e) => page.errors.push(e.message));
@@ -62,17 +64,39 @@ async function newPage(browser, opts = {}) {
 
 const shot = async (page, name) => { if (shots) await page.screenshot({ path: join(shots, `${name}.png`) }); };
 
-// Feed synthetic orientation events (both relative and absolute streams).
-async function orient(page, alpha, beta, gamma, ms = 600) {
-  await page.evaluate(async ({ alpha, beta, gamma, ms }) => {
+// Feed synthetic orientation events at 60 Hz. `abs` and `rel` are [alpha, beta, gamma]
+// for the 'deviceorientationabsolute' and 'deviceorientation' streams; null skips a stream.
+async function feed(page, { abs = null, rel = null }, ms = 600) {
+  await page.evaluate(async ({ abs, rel, ms }) => {
     const t0 = performance.now();
     while (performance.now() - t0 < ms) {
-      window.dispatchEvent(new DeviceOrientationEvent('deviceorientation', { alpha, beta, gamma, absolute: false }));
-      window.dispatchEvent(new DeviceOrientationEvent('deviceorientationabsolute', { alpha, beta, gamma, absolute: true }));
+      if (rel) window.dispatchEvent(new DeviceOrientationEvent('deviceorientation', { alpha: rel[0], beta: rel[1], gamma: rel[2], absolute: false }));
+      if (abs) window.dispatchEvent(new DeviceOrientationEvent('deviceorientationabsolute', { alpha: abs[0], beta: abs[1], gamma: abs[2], absolute: true }));
       await new Promise((r) => setTimeout(r, 16));
     }
-  }, { alpha, beta, gamma, ms });
+  }, { abs, rel, ms });
 }
+// Both streams with the same angles, as an Android phone reports them.
+const orient = (page, alpha, beta, gamma, ms = 600) => feed(page, { abs: [alpha, beta, gamma], rel: [alpha, beta, gamma] }, ms);
+
+// What the app is showing: view heading and altitude in degrees, plus mode flags.
+const state = (page) => page.evaluate(async () => {
+  await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))); // let pending changes be drawn
+  const a = window.starSky, c = a.view.centerAltAz();
+  return {
+    az: c.az * 180 / Math.PI, alt: c.alt * 180 / Math.PI, mode: a.mode, driving: a.sensorDriving, camera: a.cameraOn,
+    starting: a.cameraStarting, dec: a.tracker.declination, cal: a.settings.calibration, proj: a.view.projection,
+    manualAz: a.az * 180 / Math.PI, source: a.tracker.source, heading: a.tracker.headingSource,
+  };
+});
+const angleDiff = (a, b) => Math.abs(((a - b + 540) % 360) - 180);
+async function drag(page, dx, dy = 0) {
+  await page.mouse.move(200, 400);
+  await page.mouse.down();
+  await page.mouse.move(200 + dx, 400 + dy, { steps: 6 });
+  await page.mouse.up();
+}
+const pressed = (page, sel) => page.getAttribute(sel, 'aria-pressed');
 
 const browser = await chromium.launch({ args: GL_ARGS });
 
@@ -208,38 +232,76 @@ await check('red-light mode turns the interface and sky red', async () => {
   await ctx.close();
 });
 
-await check('motion mode follows simulated device orientation (with declination)', async () => {
+await check('motion mode follows the absolute orientation stream (with declination)', async () => {
   const { ctx, page } = await newPage(browser, { permissions: SENSORS });
   await page.click('#btn-motion');
-  await orient(page, 0, 90, 0, 900); // upright, back of phone facing magnetic north
   await page.waitForFunction(() => window.starSky.mode === 'sensor');
-  await orient(page, 0, 90, 0, 600);
-  let v = await page.evaluate(() => ({ az: window.starSky.heading, alt: window.starSky.view.centerAltAz().alt * 180 / Math.PI, dec: window.starSky.tracker.declination }));
-  const azErr = ((v.az - v.dec + 540) % 360) - 180;
-  assert.ok(Math.abs(azErr) < 0.5, `heading ${v.az} vs declination ${v.dec}`);
+  await orient(page, 0, 90, 0, 700); // upright, back of phone facing magnetic north
+  let v = await state(page);
+  assert.equal(v.source, 'absolute');
+  assert.ok(angleDiff(v.az, v.dec) < 0.5, `heading ${v.az} vs declination ${v.dec}`);
   assert.ok(Math.abs(v.alt) < 0.5, `altitude ${v.alt}`);
   await orient(page, 90, 135, 0, 800); // turned to face west, tilted 45 deg up
-  v = await page.evaluate(() => ({ az: window.starSky.heading, alt: window.starSky.view.centerAltAz().alt * 180 / Math.PI, dec: window.starSky.tracker.declination }));
-  assert.ok(Math.abs(((v.az - (270 + v.dec) + 540) % 360) - 180) < 1, `west heading ${v.az}`);
+  v = await state(page);
+  assert.ok(angleDiff(v.az, 270 + v.dec) < 1, `west heading ${v.az}`);
   assert.ok(Math.abs(v.alt - 45) < 1, `altitude ${v.alt}`);
   await shot(page, '05-motion');
-  // Calibration: "this is north" while facing west makes the view report north.
+  // Calibration: "this is north" while facing west makes the view report north, at once.
   await page.evaluate(() => window.starSky.startCalibration());
   await page.click('#calib-north');
-  await orient(page, 90, 135, 0, 800);
-  v = await page.evaluate(() => window.starSky.heading);
-  assert.ok(Math.abs(((v + 540) % 360) - 180) < 1, `calibrated heading ${v}`);
+  await page.waitForTimeout(500);
+  v = await state(page);
+  assert.ok(angleDiff(v.az, 0) < 1, `calibrated heading ${v.az}`);
   await page.click('#calib-done');
-  // Dragging the sky leaves motion mode.
-  await page.mouse.move(200, 400); await page.mouse.down(); await page.mouse.move(260, 420, { steps: 5 }); await page.mouse.up();
-  assert.equal(await page.evaluate(() => window.starSky.mode), 'manual');
+  // Dragging the sky hands the view over and carries on from the same direction:
+  // from north at 45 deg, a drag to the right and down turns the view west and up.
+  await drag(page, 14, 0); // a brush of the screen (or the first finger of a pinch) changes nothing
+  v = await state(page);
+  assert.equal(v.mode, 'sensor');
+  assert.ok(angleDiff(v.az, 0) < 1 && Math.abs(v.alt - 45) < 1, 'a small touch moved the view');
+  await drag(page, 120, 40);
+  v = await state(page);
+  assert.equal(v.mode, 'manual');
+  assert.equal(await pressed(page, '#btn-motion'), 'false');
+  assert.match(await page.textContent('#toast'), /Motion off/);
+  assert.ok(v.manualAz > 300 && v.manualAz < 355, `continued from azimuth ${v.manualAz}`);
+  assert.ok(v.alt > 46 && v.alt < 70, `continued from altitude ${v.alt}`);
   await ctx.close();
+});
+
+await check('absolute readings win over relative ones; relative is only the fallback', async () => {
+  const { ctx, page } = await newPage(browser, { permissions: SENSORS });
+  await page.click('#btn-motion');
+  await page.waitForFunction(() => window.starSky.mode === 'sensor');
+  // The relative stream has an arbitrary yaw (alpha 123); the absolute one says north.
+  await feed(page, { rel: [123, 90, 0], abs: [0, 90, 0] }, 700);
+  let v = await state(page);
+  assert.equal(v.source, 'absolute');
+  assert.ok(angleDiff(v.az, v.dec) < 0.5, `followed the wrong stream: ${v.az}`);
+  // Relative readings alone no longer move the view once absolute ones have arrived.
+  await feed(page, { rel: [200, 90, 0] }, 400);
+  v = await state(page);
+  assert.ok(angleDiff(v.az, v.dec) < 0.5, `relative stream moved the view: ${v.az}`);
+  await ctx.close();
+
+  // A device with no absolute sensor: only relative readings ever arrive.
+  const second = await newPage(browser, { permissions: SENSORS });
+  await second.page.click('#btn-motion');
+  await second.page.waitForFunction(() => window.starSky.mode === 'sensor');
+  await feed(second.page, { rel: [40, 120, 0] }, 1200);
+  v = await state(second.page);
+  assert.equal(v.source, 'relative');
+  assert.equal(v.driving, true);
+  assert.ok(angleDiff(v.az, 320) < 0.5 && Math.abs(v.alt - 30) < 0.5, `fallback view ${v.az}, ${v.alt}`);
+  await feed(second.page, { rel: [40, 120, 0] }, 2200);
+  assert.match(await second.page.textContent('#toast'), /Calibrate/);
+  await second.ctx.close();
 });
 
 await check('iOS-style compass heading (relative events + webkitCompassHeading) sets true north', async () => {
   const { ctx, page } = await newPage(browser, { permissions: SENSORS });
   // Arbitrary relative yaw (alpha 37); the compass says the camera faces 200 deg magnetic.
-  const feed = (ms) => page.evaluate(async (ms) => {
+  const compass = (ms) => page.evaluate(async (ms) => {
     const t0 = performance.now();
     while (performance.now() - t0 < ms) {
       const e = new DeviceOrientationEvent('deviceorientation', { alpha: 37, beta: 60, gamma: 0, absolute: false });
@@ -249,75 +311,356 @@ await check('iOS-style compass heading (relative events + webkitCompassHeading) 
       await new Promise((r) => setTimeout(r, 16));
     }
   }, ms);
-  const feeding = feed(1500);
   await page.click('#btn-motion');
-  await feeding;
   await page.waitForFunction(() => window.starSky.mode === 'sensor');
-  await feed(500);
-  const v = await page.evaluate(() => ({ az: window.starSky.heading, alt: window.starSky.view.centerAltAz().alt * 180 / Math.PI,
-    dec: window.starSky.tracker.declination, src: window.starSky.tracker.headingSource }));
-  assert.equal(v.src, 'compass');
-  assert.ok(Math.abs(((v.az - (200 + v.dec) + 540) % 360) - 180) < 0.5, `heading ${v.az}`);
+  await compass(1200);
+  const v = await state(page);
+  assert.equal(v.heading, 'compass');
+  assert.ok(angleDiff(v.az, 200 + v.dec) < 0.5, `heading ${v.az}`);
   assert.ok(Math.abs(v.alt + 30) < 0.5, `altitude ${v.alt}`);
   await ctx.close();
 });
 
-await check('motion button without sensor data falls back to drag mode', async () => {
+await check('motion stays on without data (no timeout); drag still pans; late readings take over', async () => {
   const { ctx, page } = await newPage(browser, { permissions: SENSORS });
   await page.click('#btn-motion');
-  await page.waitForTimeout(1900);
-  assert.equal(await page.evaluate(() => window.starSky.mode), 'manual');
-  assert.match(await page.textContent('#toast'), /not available/);
+  await page.waitForFunction(() => window.starSky.mode === 'sensor');
+  await page.waitForTimeout(3400); // well past the old 1.5 s abort
+  let v = await state(page);
+  assert.equal(v.mode, 'sensor');
+  assert.equal(v.driving, false);
+  assert.equal(await pressed(page, '#btn-motion'), 'true');
+  assert.match(await page.textContent('#toast'), /No motion data/);
+  // Manual drag works while waiting, and does not switch motion off.
+  const before = v.manualAz;
+  await drag(page, 80);
+  v = await state(page);
+  assert.ok(angleDiff(v.manualAz, before) > 3, `drag did not pan: ${before} -> ${v.manualAz}`);
+  assert.ok(angleDiff(v.az, v.manualAz) < 0.01, 'the view shows the dragged direction');
+  assert.equal(v.mode, 'sensor');
+  // Readings finally arrive: the sensors take the view.
+  await orient(page, 0, 110, 0, 500);
+  v = await state(page);
+  assert.equal(v.driving, true);
+  assert.ok(angleDiff(v.az, v.dec) < 0.5 && Math.abs(v.alt - 20) < 0.5, `late data not followed: ${v.az}, ${v.alt}`);
+  await ctx.close();
+});
+
+await check('motion can be toggled repeatedly without breaking manual drag', async () => {
+  const { ctx, page } = await newPage(browser, { permissions: SENSORS });
+  for (let round = 0; round < 3; round++) {
+    await page.click('#btn-motion');
+    await page.waitForFunction(() => window.starSky.mode === 'sensor');
+    await orient(page, 90, 120, 0, 500); // west, 30 deg up
+    let v = await state(page);
+    assert.equal(v.driving, true, `round ${round}: sensors not steering`);
+    assert.ok(angleDiff(v.az, 270 + v.dec) < 1, `round ${round}: heading ${v.az}`);
+    await page.click('#btn-motion');
+    v = await state(page);
+    assert.equal(v.mode, 'manual');
+    assert.equal(await pressed(page, '#btn-motion'), 'false');
+    // The manual view continues from where the phone pointed...
+    assert.ok(angleDiff(v.manualAz, 270 + v.dec) < 1 && Math.abs(v.alt - 30) < 1, `round ${round}: handed over at ${v.manualAz}, ${v.alt}`);
+    // ...stray sensor events no longer move it...
+    await orient(page, 0, 90, 0, 200);
+    v = await state(page);
+    assert.ok(angleDiff(v.az, 270 + v.dec) < 1, `round ${round}: sensors still steering after switch-off`);
+    // ...and dragging pans it.
+    await drag(page, 70, -30);
+    const after = await state(page);
+    assert.ok(angleDiff(after.manualAz, v.manualAz) > 3, `round ${round}: horizontal drag did nothing`);
+    assert.ok(after.alt < v.alt - 1, `round ${round}: vertical drag did nothing`);
+    assert.ok(angleDiff(after.az, after.manualAz) < 0.01);
+    await page.waitForTimeout(700); // let the fling settle
+  }
+  assert.deepEqual(page.errors.filter((e) => !/service ?worker/i.test(e)), []);
+  await ctx.close();
+});
+
+await check('pinch zoom while the sensors steer keeps motion on', async () => {
+  const { ctx, page } = await newPage(browser, { permissions: SENSORS });
+  await page.click('#btn-motion');
+  await page.waitForFunction(() => window.starSky.mode === 'sensor');
+  await orient(page, 0, 110, 0, 400);
+  const fovBefore = await page.evaluate(() => window.starSky.fov);
+  // Two fingers that do not land at the same instant: the first drifts a little before the second arrives.
+  await page.evaluate(() => {
+    const stage = document.getElementById('stage');
+    const ev = (type, id, x, y) => stage.dispatchEvent(new PointerEvent(type, {
+      pointerId: id, pointerType: 'touch', isPrimary: id === 11, clientX: x, clientY: y, bubbles: true, cancelable: true,
+    }));
+    ev('pointerdown', 11, 150, 400);
+    ev('pointermove', 11, 150, 388);
+    ev('pointerdown', 12, 260, 400);
+    for (let i = 1; i <= 8; i++) { ev('pointermove', 11, 150 - 6 * i, 388); ev('pointermove', 12, 260 + 6 * i, 400); }
+    ev('pointerup', 11, 102, 388);
+    ev('pointerup', 12, 308, 400);
+  });
+  const v = await state(page);
+  assert.equal(v.mode, 'sensor', 'a pinch switched motion off');
+  assert.equal(v.driving, true);
+  const fovAfter = await page.evaluate(() => window.starSky.fov);
+  assert.ok(fovAfter < fovBefore * 0.8, `pinch did not zoom: ${fovBefore} -> ${fovAfter}`);
+  assert.ok(angleDiff(v.az, v.dec) < 0.5 && Math.abs(v.alt - 20) < 0.5, 'the sensors should still be steering');
   await ctx.close();
 });
 
 await check('declined motion permission falls back to drag mode', async () => {
-  const { ctx, page } = await newPage(browser);
+  // An explicit refusal, as iOS or a blocked Chrome site setting reports it.
+  const { ctx, page } = await newPage(browser, {}, () => {
+    window.DeviceOrientationEvent.requestPermission = async () => 'denied';
+  });
   await page.click('#btn-motion');
   await page.waitForTimeout(400);
-  assert.equal(await page.evaluate(() => window.starSky.mode), 'manual');
+  assert.equal((await state(page)).mode, 'manual');
+  assert.equal(await pressed(page, '#btn-motion'), 'false');
   assert.match(await page.textContent('#toast'), /declined/);
+  const before = (await state(page)).manualAz;
+  await drag(page, 80);
+  assert.ok(angleDiff((await state(page)).manualAz, before) > 3, 'drag works after a declined permission');
+  await ctx.close();
+});
+
+await check('an unanswered motion permission request does not stop the tracker from listening', async () => {
+  // No sensor permission granted: headless Chromium answers "prompt", neither yes nor no.
+  const { ctx, page } = await newPage(browser);
+  await page.click('#btn-motion');
+  await page.waitForFunction(() => window.starSky.mode === 'sensor', null, { timeout: 3000 });
+  await orient(page, 270, 90, 0, 500);
+  const v = await state(page);
+  assert.equal(v.driving, true);
+  assert.ok(angleDiff(v.az, 90 + v.dec) < 0.5, `heading ${v.az}`);
   await ctx.close();
 });
 
 await browser.close();
 
-// Camera overlay with Chromium's fake camera.
+// Records every getUserMedia request and its outcome in window.__gum.
+const recordGetUserMedia = () => {
+  const md = navigator.mediaDevices;
+  if (!md || !md.getUserMedia) return;
+  const real = md.getUserMedia.bind(md);
+  window.__gum = [];
+  window.__realGetUserMedia = real;
+  md.getUserMedia = async (constraints) => {
+    const entry = { video: JSON.parse(JSON.stringify(constraints.video)), audio: constraints.audio };
+    window.__gum.push(entry);
+    try { const stream = await real(constraints); entry.result = 'ok'; return stream; }
+    catch (err) { entry.result = err.name; throw err; }
+  };
+};
+const videoState = (page) => page.evaluate(() => {
+  const v = document.getElementById('camera');
+  return {
+    live: !!v.srcObject && v.srcObject.getVideoTracks().some((t) => t.readyState === 'live'),
+    paused: v.paused, ready: v.readyState, width: v.videoWidth, inline: v.hasAttribute('playsinline'), muted: v.muted,
+    shown: getComputedStyle(v).display !== 'none', behind: v.compareDocumentPosition(document.getElementById('sky')) === Node.DOCUMENT_POSITION_FOLLOWING,
+  };
+});
+
+// Camera backdrop with Chromium's fake camera (permission granted).
 const camBrowser = await chromium.launch({ args: [...GL_ARGS, '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] });
-await check('camera overlay shows live video under a transparent perspective sky', async () => {
-  const { ctx, page } = await newPage(camBrowser, { permissions: ['camera', ...SENSORS] });
-  const feeding = orient(page, 0, 100, 0, 3500);
+
+await check('camera opens the rear camera inline without any motion sensors', async () => {
+  // No sensor permission and no orientation events: the camera must not care.
+  const { ctx, page } = await newPage(camBrowser, { permissions: ['camera'] }, recordGetUserMedia);
   await page.click('#btn-camera');
-  await feeding;
   await page.waitForFunction(() => window.starSky.cameraOn, null, { timeout: 5000 });
-  const st = await page.evaluate(() => ({
-    proj: window.starSky.view.projection, ready: document.getElementById('camera').readyState,
-    cls: document.documentElement.classList.contains('camera'),
-    corner: (() => { const a = window.starSky; a.draw(); return a.renderer.readPixel(5, 5); })(),
-  }));
-  assert.equal(st.proj, 'perspective');
-  assert.ok(st.cls);
-  assert.ok(st.ready >= 2, `video readyState ${st.ready}`);
-  assert.equal(st.corner[3], 0, 'sky background should be transparent over the video');
+  await page.waitForFunction(() => document.getElementById('camera').videoWidth > 0, null, { timeout: 5000 });
+  let v = await state(page);
+  assert.equal(v.mode, 'manual', 'the camera must not switch motion on');
+  assert.equal(v.proj, 'perspective');
+  assert.equal(await pressed(page, '#btn-camera'), 'true');
+  assert.equal(await pressed(page, '#btn-motion'), 'false');
+  assert.match(await page.textContent('#toast'), /Tap Motion/);
+  const vid = await videoState(page);
+  assert.ok(vid.live && !vid.paused && vid.ready >= 2, `video not playing: ${JSON.stringify(vid)}`);
+  assert.ok(vid.inline && vid.muted && vid.shown && vid.behind, `video not inline behind the sky: ${JSON.stringify(vid)}`);
+  // The rear camera is asked for first; the fake camera has no facing mode, so the looser request is used.
+  const gum = await page.evaluate(() => window.__gum);
+  assert.deepEqual(gum[0].video.facingMode, { exact: 'environment' });
+  assert.equal(gum[0].audio, false);
+  assert.equal(gum.at(-1).result, 'ok');
+  assert.ok(gum.length <= 3);
+  const corner = await page.evaluate(() => { const a = window.starSky; a.draw(); return a.renderer.readPixel(5, 5); });
+  assert.equal(corner[3], 0, 'sky background should be transparent over the video');
   await shot(page, '06-camera');
+  // Manual drag still pans the sky over the camera picture.
+  const before = v.manualAz;
+  await drag(page, 80);
+  v = await state(page);
+  assert.ok(angleDiff(v.manualAz, before) > 3, 'drag did not pan with the camera on');
+  assert.equal(v.cal, 0, 'a manual pan must not touch the calibration');
   await page.click('#btn-camera');
-  assert.equal(await page.evaluate(() => window.starSky.cameraOn), false);
+  v = await state(page);
+  assert.equal(v.camera, false);
+  assert.equal(v.proj, 'stereographic');
+  assert.equal((await videoState(page)).live, false, 'camera not released');
+  assert.deepEqual(page.errors.filter((e) => !/service ?worker/i.test(e)), []);
+  await ctx.close();
+});
+
+await check('camera and motion are independent switches', async () => {
+  const { ctx, page } = await newPage(camBrowser, { permissions: ['camera', ...SENSORS] });
+  await page.click('#btn-camera');
+  await page.waitForFunction(() => window.starSky.cameraOn, null, { timeout: 5000 });
+  await page.click('#btn-motion');
+  await page.waitForFunction(() => window.starSky.mode === 'sensor');
+  await orient(page, 0, 100, 0, 500);
+  let v = await state(page);
+  assert.ok(v.camera && v.driving, 'camera and motion should both be on');
+  assert.ok(angleDiff(v.az, v.dec) < 0.5 && Math.abs(v.alt - 10) < 0.5);
+  // With both on, a sideways drag lines the overlay up instead of leaving motion mode.
+  await drag(page, 90);
+  v = await state(page);
+  assert.equal(v.mode, 'sensor');
+  assert.ok(Math.abs(v.cal) > 1, `calibration unchanged: ${v.cal}`);
+  await page.evaluate(() => window.starSky.set('calibration', 0));
+  // Motion off: the camera stays, and the sky can be dragged.
+  await page.click('#btn-motion');
+  v = await state(page);
+  assert.equal(v.mode, 'manual');
+  assert.equal(v.camera, true, 'switching motion off must not stop the camera');
+  assert.equal((await videoState(page)).live, true);
+  const before = v.manualAz;
+  await drag(page, 80);
+  v = await state(page);
+  assert.ok(angleDiff(v.manualAz, before) > 3 && v.cal === 0, 'drag should pan, not calibrate, with motion off');
+  // Motion on again, then camera off: motion stays.
+  await page.click('#btn-motion');
+  await page.waitForFunction(() => window.starSky.mode === 'sensor');
+  await orient(page, 90, 100, 0, 500);
+  await page.click('#btn-camera');
+  v = await state(page);
+  assert.equal(v.camera, false);
+  assert.equal(v.mode, 'sensor', 'switching the camera off must not stop motion');
+  assert.equal(v.proj, 'stereographic');
+  await orient(page, 180, 100, 0, 500);
+  v = await state(page);
+  assert.ok(angleDiff(v.az, 180 + v.dec) < 1, `motion no longer steering: ${v.az}`);
+  await ctx.close();
+});
+
+await check('camera copes with refused playback, a lost track and backgrounding', async () => {
+  const { ctx, page } = await newPage(camBrowser, { permissions: ['camera'] }, () => {
+    // A WebView that refuses script-started playback.
+    window.__playCalls = 0;
+    const realPlay = HTMLMediaElement.prototype.play;
+    HTMLMediaElement.prototype.play = function play() {
+      window.__playCalls++;
+      if (window.__refusePlay) return Promise.reject(new DOMException('gesture required', 'NotAllowedError'));
+      return realPlay.call(this);
+    };
+    window.__refusePlay = true;
+  });
+  await page.click('#btn-camera');
+  await page.waitForFunction(() => window.starSky.cameraOn, null, { timeout: 5000 });
+  assert.equal((await videoState(page)).live, true, 'a refused play() must not abort the camera');
+  // Playback held until the user touches the page: the next touch starts it.
+  await page.evaluate(() => { document.getElementById('camera').pause(); window.__refusePlay = false; });
+  assert.equal((await videoState(page)).paused, true);
+  await page.mouse.move(200, 300); await page.mouse.down(); await page.mouse.up();
+  await page.waitForFunction(() => !document.getElementById('camera').paused, null, { timeout: 3000 });
+  // Hidden: the camera is released. Visible again: it comes back by itself.
+  const setHidden = (hidden) => page.evaluate((h) => {
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => h });
+    document.dispatchEvent(new Event('visibilitychange'));
+  }, hidden);
+  await setHidden(true);
+  assert.equal((await videoState(page)).live, false, 'camera kept running in the background');
+  await setHidden(false);
+  await page.waitForFunction(() => {
+    const v = document.getElementById('camera');
+    return window.starSky.cameraOn && v.srcObject && v.srcObject.getVideoTracks()[0].readyState === 'live';
+  }, null, { timeout: 5000 });
+  // The system takes the camera away (another app, revoked permission).
+  await page.evaluate(() => document.getElementById('camera').srcObject.getVideoTracks()[0].dispatchEvent(new Event('ended')));
+  const v = await state(page);
+  assert.equal(v.camera, false);
+  assert.equal(v.proj, 'stereographic');
+  assert.match(await page.textContent('#toast'), /virtual sky/);
+  assert.deepEqual(page.errors.filter((e) => !/service ?worker/i.test(e)), []);
+  await ctx.close();
+});
+
+await check('a camera request left hanging can be cancelled and retried', async () => {
+  const { ctx, page } = await newPage(camBrowser, { permissions: ['camera'] }, () => {
+    // A host that never answers the permission request, until told to.
+    const md = navigator.mediaDevices;
+    if (!md) return;
+    const real = md.getUserMedia.bind(md);
+    window.__hang = true;
+    window.__release = [];
+    md.getUserMedia = (c) => (window.__hang
+      ? new Promise((resolve, reject) => { window.__release.push(() => real(c).then(resolve, reject)); })
+      : real(c));
+  });
+  await page.click('#btn-camera');
+  await page.waitForTimeout(300);
+  let v = await state(page);
+  assert.equal(v.starting, true);
+  assert.equal(v.camera, false);
+  assert.equal(await page.getAttribute('#btn-camera', 'aria-busy'), 'true');
+  await page.click('#btn-camera'); // cancel
+  v = await state(page);
+  assert.equal(v.starting, false);
+  assert.equal(await page.getAttribute('#btn-camera', 'aria-busy'), 'false');
+  // The old request is answered late: its stream must be dropped, not shown.
+  const late = await page.evaluate(async () => {
+    window.__hang = false;
+    for (const go of window.__release) go();
+    await new Promise((r) => setTimeout(r, 1200));
+    return { on: window.starSky.cameraOn, attached: !!document.getElementById('camera').srcObject };
+  });
+  assert.deepEqual(late, { on: false, attached: false });
+  // And the button still works.
+  await page.click('#btn-camera');
+  await page.waitForFunction(() => window.starSky.cameraOn, null, { timeout: 5000 });
   await ctx.close();
 });
 await camBrowser.close();
 
-const denyBrowser = await chromium.launch({ args: [...GL_ARGS, '--use-fake-device-for-media-stream'] });
-await check('denied camera permission falls back to the virtual sky', async () => {
-  const { ctx, page } = await newPage(denyBrowser, { permissions: SENSORS });
-  const feeding = orient(page, 0, 100, 0, 2500);
+// The same fake camera, with every permission request refused (a real NotAllowedError).
+const denyBrowser = await chromium.launch({ args: [...GL_ARGS, '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream=deny'] });
+await check('denied camera permission keeps the virtual sky and leaves motion alone', async () => {
+  const { ctx, page } = await newPage(denyBrowser, { permissions: SENSORS }, recordGetUserMedia);
+  await page.click('#btn-motion');
+  await page.waitForFunction(() => window.starSky.mode === 'sensor');
+  await orient(page, 0, 100, 0, 400);
   await page.click('#btn-camera');
-  await feeding;
-  await page.waitForTimeout(500);
-  const st = await page.evaluate(() => ({ cam: window.starSky.cameraOn, proj: window.starSky.view.projection, mode: window.starSky.mode }));
-  assert.equal(st.cam, false);
-  assert.equal(st.proj, 'stereographic');
-  assert.match(await page.textContent('#toast'), /virtual sky/);
+  await page.waitForFunction(() => /virtual sky/.test(document.getElementById('toast').textContent), null, { timeout: 5000 });
+  assert.match(await page.textContent('#toast'), /denied/);
+  let v = await state(page);
+  assert.equal(v.camera, false);
+  assert.equal(v.starting, false);
+  assert.equal(v.proj, 'stereographic');
+  assert.equal(v.mode, 'sensor', 'a refused camera must not switch motion off');
+  assert.equal(await pressed(page, '#btn-camera'), 'false');
+  const gum = await page.evaluate(() => window.__gum);
+  assert.equal(gum.at(-1).result, 'NotAllowedError');
+  assert.equal(gum.filter((g) => g.result === 'NotAllowedError').length, 1, 'must not ask again after a refusal');
+  const corner = await page.evaluate(() => { const a = window.starSky; a.draw(); return a.renderer.readPixel(5, 5); });
+  assert.equal(corner[3], 255, 'the virtual sky should still be drawn');
+  // Motion still steers, and the button can be tried again later.
+  await orient(page, 90, 100, 0, 500);
+  v = await state(page);
+  assert.ok(angleDiff(v.az, 270 + v.dec) < 1);
   await shot(page, '07-camera-denied');
+  await ctx.close();
+});
+
+await check('no camera API (page not on HTTPS) is reported, not fatal', async () => {
+  const { ctx, page } = await newPage(denyBrowser, {}, () => {
+    Object.defineProperty(navigator, 'mediaDevices', { configurable: true, get: () => undefined });
+    Object.defineProperty(window, 'isSecureContext', { configurable: true, get: () => false });
+  });
+  await page.click('#btn-camera');
+  await page.waitForFunction(() => /virtual sky/.test(document.getElementById('toast').textContent), null, { timeout: 3000 });
+  assert.match(await page.textContent('#toast'), /HTTPS/);
+  const v = await state(page);
+  assert.equal(v.camera, false);
+  assert.equal(v.starting, false);
+  assert.deepEqual(page.errors.filter((e) => !/service ?worker/i.test(e)), []);
   await ctx.close();
 });
 

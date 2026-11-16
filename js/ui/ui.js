@@ -144,12 +144,14 @@ export class UI {
 
   syncModes() {
     const app = this.app;
+    const driving = app.sensorDriving; // readings are steering the view right now
     $('#btn-motion').setAttribute('aria-pressed', String(app.mode === 'sensor'));
     $('#btn-camera').setAttribute('aria-pressed', String(app.cameraOn));
+    $('#btn-camera').setAttribute('aria-busy', String(!!app.cameraStarting));
     $('#calib-banner').hidden = !(app.calibrating && app.mode === 'sensor');
     $('#heading-readout').hidden = app.mode !== 'sensor';
-    $('#info-center').textContent = app.mode === 'sensor' ? 'Follow the arrow' : 'Show me';
-    $('#info-center').disabled = app.mode === 'sensor';
+    $('#info-center').textContent = driving ? 'Follow the arrow' : 'Show me';
+    $('#info-center').disabled = driving;
   }
 
   syncSettings() {

@@ -87,6 +87,7 @@ svg { width: 22px; height: 22px; display: block; }
 }
 .tool span { font-size: 11px; letter-spacing: 0.02em; }
 .tool[aria-pressed="true"] { color: var(--accent); background: rgba(255, 255, 255, 0.04); }
+.tool[aria-busy="true"] { opacity: 0.55; }
 .tool:focus-visible, .btn:focus-visible, .icon-btn:focus-visible, .pill:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 
 .card, .sheet, .banner {

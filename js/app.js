@@ -17,6 +17,8 @@ import { CameraFeed } from './sensors/camera.js';
 
 const STORAGE_KEY = 'starsky.settings.v1';
 const SIDEREAL_RATE = 360 / 86164.1; // deg per second
+// How far a finger must travel before it overrides or re-aligns the motion sensors.
+const DRAG_INTENT_PX = 28;
 
 export const DEFAULTS = {
   magLimit: 5.5,
@@ -57,6 +59,20 @@ const LINE_COLORS = {
   },
 };
 
+const MOTION_MESSAGES = {
+  denied: 'Motion access was declined. Drag to look around.',
+  insecure: 'Motion sensors need HTTPS or the installed app. Drag to look around.',
+  unsupported: 'This browser has no motion sensors. Drag to look around.',
+};
+const CAMERA_MESSAGES = {
+  denied: 'Camera access was denied — showing the virtual sky. You can allow it in the browser or app settings.',
+  insecure: 'The camera needs HTTPS or the installed app — showing the virtual sky.',
+  unsupported: 'This browser cannot open the camera — showing the virtual sky.',
+  notfound: 'No camera found — showing the virtual sky.',
+  busy: 'The camera is in use by another app — showing the virtual sky.',
+  unavailable: 'Camera unavailable — showing the virtual sky.',
+};
+
 const easeInOut = (t) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);
 
 export class App {
@@ -65,8 +81,15 @@ export class App {
     this.listeners = {};
     this.settings = loadSettings();
     this.timeOffset = 0;
-    this.mode = 'manual'; // 'manual' | 'sensor'
-    this.cameraOn = false;
+    // Motion tracking and the camera backdrop are two independent switches.
+    this.mode = 'manual'; // 'manual' | 'sensor': may orientation readings steer the view?
+    this.cameraOn = false; // is the rear camera the backdrop?
+    this.cameraStarting = false; // a camera request (permission prompt) is open
+    this.sensorsStarting = false; // a motion permission prompt is open
+    this.sensorLive = false; // readings have arrived since motion was switched on
+    this.wasDriving = false;
+    this.panning = false; // a manual pan is in progress
+    this.dragKind = null; // 'pan' | 'align'
     this.calibrating = false;
     this.selection = null;
     this.az = this.settings.view.az * DEG;
@@ -103,9 +126,28 @@ export class App {
     this.tracker = new OrientationTracker();
     this.tracker.calibration = this.settings.calibration;
     this.tracker.onChange = () => {
-      if (this.mode === 'sensor' && this.tracker.needsFrame()) this.requestFrame();
+      if (this.mode !== 'sensor') return;
+      if (!this.sensorLive) {
+        // First reading since motion was switched on: the sensors take the view.
+        this.sensorLive = true;
+        this.anim = this.inertia = null;
+        this.emit('mode');
+        this.requestFrame();
+      } else if (this.tracker.needsFrame()) {
+        this.requestFrame();
+      }
     };
     this.camera = new CameraFeed(this.el.video);
+    this.camera.onEnded = () => {
+      if (!this.cameraOn) return;
+      this.stopCamera();
+      this.toast('The camera stopped — showing the virtual sky.');
+    };
+    // The picture's shape changes when the stream starts and when the phone is
+    // rotated; the overlay scale depends on it.
+    for (const type of ['loadedmetadata', 'resize']) this.el.video.addEventListener(type, () => this.requestFrame());
+    // A WebView may hold the video until the user touches the page.
+    this.el.stage.addEventListener('pointerdown', () => { if (this.cameraOn) this.camera.ensurePlaying(); });
 
     const [{ stars, cons }, wmm] = await Promise.all([
       loadCatalogs('./data/'),
@@ -121,6 +163,9 @@ export class App {
     this.resize();
     window.addEventListener('resize', () => this.resize());
     window.addEventListener('orientationchange', () => setTimeout(() => this.resize(), 250));
+    if (typeof screen !== 'undefined' && screen.orientation?.addEventListener) {
+      screen.orientation.addEventListener('change', () => setTimeout(() => this.resize(), 250));
+    }
     this.gestures = new Gestures(this.el.stage, {
       dragStart: () => this.onDragStart(),
       drag: (dx, dy) => this.onDrag(dx, dy),
@@ -188,13 +233,19 @@ export class App {
   useDeviceLocation() {
     return new Promise((resolve) => {
       if (!navigator.geolocation) { resolve({ ok: false, reason: 'unsupported' }); return; }
+      // A WebView whose host app never answers the location request calls
+      // neither callback, so make sure the caller always hears back.
+      const watchdog = setTimeout(() => resolve({ ok: false, reason: 'unavailable' }), 30000);
       navigator.geolocation.getCurrentPosition(async (pos) => {
+        clearTimeout(watchdog);
         const lat = pos.coords.latitude, lon = pos.coords.longitude;
         const near = await this.nearestCity(lat, lon);
         this.setLocation({ lat: +lat.toFixed(4), lon: +lon.toFixed(4), name: near ? `Near ${near}` : 'My location', source: 'gps' });
         resolve({ ok: true });
-      }, (err) => resolve({ ok: false, reason: err.code === 1 ? 'denied' : 'unavailable' }),
-      { enableHighAccuracy: false, timeout: 20000, maximumAge: 6 * 3600 * 1000 });
+      }, (err) => {
+        clearTimeout(watchdog);
+        resolve({ ok: false, reason: err.code === 1 ? 'denied' : 'unavailable' });
+      }, { enableHighAccuracy: false, timeout: 20000, maximumAge: 6 * 3600 * 1000 });
     });
   }
 
@@ -287,77 +338,102 @@ export class App {
   }
 
   // ------------------------------------------------------------------ modes
-  async toggleMotion() {
-    if (this.mode === 'sensor') {
-      if (this.cameraOn) this.stopCamera();
-      this.stopSensors();
-      return;
-    }
-    await this.startSensors();
+  // Motion tracking (mode) and the camera backdrop (cameraOn) are separate
+  // switches: either works without the other, and neither turns the other on or
+  // off. The view follows the sensors only while readings are arriving; until
+  // then, and on devices without sensors, dragging keeps working.
+
+  /** True while orientation readings are steering the view. */
+  get sensorDriving() {
+    return this.mode === 'sensor' && this.tracker.hasData && !this.panning;
   }
 
+  async toggleMotion() {
+    if (this.mode === 'sensor') this.stopSensors();
+    else await this.startSensors();
+  }
+
+  /**
+   * Switch motion tracking on. This only attaches the sensor listeners; it does
+   * not wait for readings, so it cannot time out. Resolves to false only when
+   * the browser has no orientation events or the user refused permission.
+   */
   async startSensors() {
+    if (this.mode === 'sensor') return true;
+    if (this.sensorsStarting) return false;
+    this.sensorsStarting = true;
     const res = await this.tracker.start();
+    this.sensorsStarting = false;
     if (!res.ok) {
-      this.toast(res.reason === 'denied'
-        ? 'Motion access was declined. Drag to look around.'
-        : 'Motion sensors are not available here. Drag to look around.');
+      this.toast(MOTION_MESSAGES[res.reason] || MOTION_MESSAGES.unsupported);
       this.emit('mode');
       return false;
     }
     this.mode = 'sensor';
-    this.anim = this.inertia = null;
-    clearTimeout(this.headingTimer);
-    this.headingTimer = setTimeout(() => {
-      if (this.mode === 'sensor' && !this.tracker.hasHeading && !this.settings.calibration) {
-        this.toast('No compass reading — use Calibrate to set north.');
-      }
-    }, 2000);
+    this.sensorLive = this.tracker.hasData;
+    this.watchSensors();
+    if (this.cameraOn) this.overlayHint();
     this.emit('mode');
     this.requestFrame();
     return true;
   }
 
+  /** A few seconds after switching on, say so if no readings or no compass turned up. Listening continues. */
+  watchSensors() {
+    clearTimeout(this.sensorHintTimer);
+    this.sensorHintTimer = setTimeout(() => {
+      if (this.mode !== 'sensor' || document.hidden) return;
+      if (!this.tracker.hasData) {
+        this.toast(window.isSecureContext === false
+          ? 'Motion sensors need HTTPS or the installed app. Drag to look around.'
+          : 'No motion data from this device yet. Drag to look around; the sky will follow when it arrives.');
+      } else if (!this.tracker.hasHeading && !this.calibrating) {
+        this.toast('No compass reading — use Calibrate to set north.');
+      }
+    }, 3000);
+  }
+
   stopSensors() {
+    const wasDriving = this.sensorDriving;
     this.tracker.stop();
-    if (this.mode === 'sensor') {
+    clearTimeout(this.sensorHintTimer);
+    if (wasDriving) {
+      // Carry on by hand from wherever the phone was pointing.
       const c = this.view.centerAltAz();
       this.az = c.az;
       this.alt = clamp(c.alt, -Math.PI / 2, Math.PI / 2);
+      this.anim = this.inertia = null;
     }
     this.mode = 'manual';
+    this.sensorLive = false;
     this.calibrating = false;
     this.emit('mode');
     this.requestFrame();
   }
 
+  /**
+   * Camera button: ask for the rear camera and show it behind the sky. It works
+   * with or without motion tracking. A second tap while the permission prompt
+   * is still open cancels the request, so the button can never get stuck.
+   */
   async toggleCamera() {
-    if (this.cameraOn) { this.stopCamera(); return; }
-    if (this.mode !== 'sensor') {
-      const ok = await this.startSensors();
-      if (!ok) { this.toast('The camera view needs motion sensors — showing the virtual sky.'); return; }
-    }
+    if (this.cameraOn || this.cameraStarting) { this.stopCamera(); return; }
+    this.cameraStarting = true;
+    this.emit('mode');
     const res = await this.camera.start();
+    if (!res.ok && res.reason === 'cancelled') return; // switched off again meanwhile
+    this.cameraStarting = false;
     if (!res.ok) {
-      this.toast(res.reason === 'denied'
-        ? 'Camera permission denied — showing the virtual sky.'
-        : 'Camera unavailable — showing the virtual sky.');
+      this.toast(CAMERA_MESSAGES[res.reason] || CAMERA_MESSAGES.unavailable);
       this.emit('mode');
+      this.requestFrame();
       return;
     }
     this.cameraOn = true;
-    for (const t of this.camera.stream.getVideoTracks()) {
-      t.addEventListener('ended', () => {
-        if (this.cameraOn) { this.stopCamera(); this.toast('Camera stopped — showing the virtual sky.'); }
-      });
-    }
     document.documentElement.classList.add('camera');
-    this.el.video.addEventListener('loadedmetadata', () => this.requestFrame(), { once: true });
-    if (!this.settings.cameraHintShown) {
-      this.toast('Drag sideways to line the sky up with the view; pinch to match the camera’s zoom.');
-      this.settings.cameraHintShown = true;
-      this.scheduleSave();
-    }
+    if (res.facing === 'user') this.toast('No rear camera found — using the front camera.');
+    else if (this.mode === 'sensor') this.overlayHint();
+    else this.toast('Camera on. Tap Motion to make the sky follow your phone.');
     this.emit('mode');
     this.requestFrame();
   }
@@ -365,9 +441,18 @@ export class App {
   stopCamera() {
     this.camera.stop();
     this.cameraOn = false;
+    this.cameraStarting = false;
     document.documentElement.classList.remove('camera');
     this.emit('mode');
     this.requestFrame();
+  }
+
+  /** One-time tip for the camera + motion overlay. */
+  overlayHint() {
+    if (this.settings.cameraHintShown) return;
+    this.toast('Drag sideways to line the sky up with the view; pinch to match the camera’s zoom.');
+    this.settings.cameraHintShown = true;
+    this.scheduleSave();
   }
 
   startCalibration() {
@@ -395,15 +480,38 @@ export class App {
   // ------------------------------------------------------------------ input
   onDragStart() {
     this.anim = this.inertia = null;
+    this.dragTravel = 0;
+    if (this.sensorDriving) {
+      // The sensors are steering. With the camera overlay (or while calibrating)
+      // a drag nudges the heading so the drawn sky lines up with the real one;
+      // otherwise a deliberate drag takes the view over.
+      this.dragKind = this.calibrating || this.cameraOn ? 'align' : 'takeover';
+      return;
+    }
+    // Sensors off, or on but silent so far: a drag pans.
+    this.dragKind = 'pan';
+    this.panning = true;
   }
 
   onDrag(dx, dy) {
     const radPerPx = 1 / this.view.pxPerRadian;
-    if (this.mode === 'sensor' && (this.calibrating || this.cameraOn)) {
-      this.set('calibration', this.settings.calibration - dx * radPerPx * RAD);
+    if (this.dragKind === 'takeover' || this.dragKind === 'align') {
+      // Ignore a finger that only brushes the screen or is the first of a pinch.
+      const intended = this.dragTravel >= DRAG_INTENT_PX;
+      this.dragTravel += Math.hypot(dx, dy);
+      if (this.dragTravel < DRAG_INTENT_PX) return;
+      if (this.dragKind === 'takeover') {
+        this.stopSensors(); // continues by hand from where the phone was pointing
+        this.toast('Motion off. Tap Motion to follow the phone again.');
+        this.dragKind = 'pan';
+        this.panning = true;
+        return;
+      }
+      if (!intended) return; // start aligning from here, without a jump
+      const cal = this.settings.calibration - dx * radPerPx * RAD;
+      this.set('calibration', ((cal + 540) % 360) - 180);
       return;
     }
-    if (this.mode === 'sensor') this.stopSensors();
     const f = 1 / Math.max(Math.cos(this.alt), 0.5);
     this.az = (this.az - dx * radPerPx * f + 2 * Math.PI) % (2 * Math.PI);
     this.alt = clamp(this.alt + dy * radPerPx, -Math.PI / 2, Math.PI / 2);
@@ -411,15 +519,18 @@ export class App {
   }
 
   onDragEnd(vx, vy) {
-    if (this.mode !== 'manual') return;
+    const kind = this.dragKind;
+    this.dragKind = null;
+    this.panning = false;
+    this.scheduleSave();
+    if (kind !== 'pan') return;
+    if (this.sensorDriving) { this.requestFrame(); return; } // readings arrived during the drag
     const radPerPx = 1 / this.view.pxPerRadian;
-    const speed = Math.hypot(vx, vy);
-    if (speed > 0.25) {
+    if (Math.hypot(vx, vy) > 0.25) {
       const f = 1 / Math.max(Math.cos(this.alt), 0.5);
       this.inertia = { vaz: -vx * 1000 * radPerPx * f, valt: vy * 1000 * radPerPx };
       this.requestFrame();
     }
-    this.scheduleSave();
   }
 
   onPinch(scale) {
@@ -450,7 +561,7 @@ export class App {
     };
     const fn = keys[e.key];
     if (!fn) return;
-    if (this.mode === 'sensor' && e.key.startsWith('Arrow')) this.stopSensors();
+    if (this.sensorDriving && e.key.startsWith('Arrow')) this.stopSensors();
     fn();
     this.az = (this.az + 2 * Math.PI) % (2 * Math.PI);
     e.preventDefault();
@@ -474,7 +585,12 @@ export class App {
     } else {
       if (this.mode === 'sensor') this.tracker.resume();
       if (this.cameraOn) {
-        this.camera.start().then((r) => { if (!r.ok) this.stopCamera(); });
+        // The camera was released while hidden; take it back.
+        this.camera.start().then((r) => {
+          if (r.ok || r.reason === 'cancelled' || !this.cameraOn) return;
+          this.stopCamera();
+          this.toast(CAMERA_MESSAGES[r.reason] || CAMERA_MESSAGES.unavailable);
+        });
       }
       this.updateSky();
       this.scheduleTick();
@@ -519,17 +635,19 @@ export class App {
     const dt = this.lastFrame ? Math.min(0.1, (t - this.lastFrame) / 1000) : 1 / 60;
     this.lastFrame = t;
     let again = false;
-    if (this.mode === 'sensor') {
+    const driving = this.sensorDriving;
+    if (driving) {
+      if (!this.wasDriving) this.tracker.snap(); // start at the current reading, not an old one
       const s = this.tracker.step(dt, this.cameraOn);
-      if (s) {
-        const b = this.tracker.basis(s.q);
-        this.view.setBasis(b.right, b.up, b.forward);
-        again = s.moving;
-      }
+      const b = this.tracker.basis(s.q);
+      this.view.setBasis(b.right, b.up, b.forward);
+      again = s.moving;
     } else {
+      // Manual view: also while motion is on but no reading has arrived yet.
       again = this.stepManual(dt, t);
       this.view.setFromAltAz(this.az, this.alt);
     }
+    this.wasDriving = driving;
     this.applyProjection();
     this.draw();
     this.emit('frame');
@@ -807,13 +925,19 @@ export class App {
   /** Point the view at an object (manual mode) or guide the user to it (sensor mode). */
   centerOn(item) {
     this.select(item);
-    if (this.mode === 'sensor') return;
+    if (this.sensorDriving) return; // the phone decides where to look; the arrow shows the way
     const enu = this.objectEnu(item);
     const { az, alt } = altAz(enu);
-    const fov1 = item.type === 'con' ? Math.max(this.fov, 60 * DEG) : this.fov;
     // Aim a little low so the object ends up above the info card (about 30% from the top).
-    const k = (Math.min(this.view.width, this.view.height) / 2) * (1 + Math.cos(fov1 / 2)) / Math.sin(fov1 / 2);
-    const lift = 2 * Math.atan((0.2 * this.view.height) / k);
+    let fov1 = this.fov, lift;
+    if (this.cameraOn) {
+      // The camera overlay keeps its own fixed field of view.
+      lift = this.view.angleAtRadius(0.2 * this.view.height);
+    } else {
+      if (item.type === 'con') fov1 = Math.max(this.fov, 60 * DEG);
+      const k = (Math.min(this.view.width, this.view.height) / 2) * (1 + Math.cos(fov1 / 2)) / Math.sin(fov1 / 2);
+      lift = 2 * Math.atan((0.2 * this.view.height) / k);
+    }
     this.inertia = null;
     this.anim = {
       t0: performance.now(), duration: 700,
